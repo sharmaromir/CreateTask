@@ -1,7 +1,14 @@
-import pygame #drawing
-import random #random number generation
 import math
 import pickle
+import pygame
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import random
+import numpy as np
+from collections import deque
+import matplotlib.pyplot as conspire 
 
 # defining constants
 NUM_WALLS = 3 #constant, the number of walls you can collide with
@@ -22,14 +29,174 @@ pygame.init()
 pygame.font.init()
 font = pygame.font.Font(None, FONT_SIZE) #create the font
 header = pygame.font.Font(None, 54) #header font
-screen = pygame.display.set_mode((1280, 720))
+screen = pygame.display.set_mode((1280, 720), pygame.DOUBLEBUF)
 clock = pygame.time.Clock()
 r = open("highscore.in", "r") #reading highscores
 
+def update_screen():
+    pygame.display.update()
+    screen.fill('black')
+
+class DQN(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(state_size, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_size)
+    
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
+
+class DQNAgent:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = DQN(state_size, action_size).to(self.device)
+
+    def act(self, state):
+        state = torch.tensor(state, dtype=torch.float32).to(self.device)
+        with torch.no_grad():
+            act_values = self.model(state)
+        return np.argmax(act_values.cpu().data.numpy())
+
+    def load(self, name):
+        self.model.load_state_dict(torch.load(name))
+
+class Wall(object): #done
+    def __init__(self, gameClone, iter):
+        self.game = gameClone
+        self.x = self.game.game_width*(1/3+iter/3)+(iter*self.game.wall_size)/3
+        center = random.randint((int)(self.game.game_height/4), (int)(self.game.game_height*3/4)) #choose a random center
+        radius = random.randint((int)(self.game.game_height/6), (int)(self.game.game_height/4)) #choose a random width
+        self.min_y, self.max_y = max(center - radius, 0), min(center + radius, self.game.game_height)
+
+    def wall_coord(self):
+        self.x = self.game.game_width
+        center = random.randint((int)(self.game.game_height/4), (int)(self.game.game_height*3/4)) #choose a random center
+        radius = random.randint((int)(self.game.game_height/6), (int)(self.game.game_height/4)) #choose a random width
+        self.min_y, self.max_y = max(center - radius, 0), min(center + radius, self.game.game_height)
+        return max(center - radius, 0), min(center + radius, screen.get_height())
+
+    def display_wall(self):
+        wall_surface = pygame.Surface((self.game.wall_size, screen.get_height()), pygame.SRCALPHA).convert_alpha()
+        pygame.draw.rect(wall_surface, (255, 105, 180, 128), (0, 0, self.game.wall_size, self.min_y))
+        pygame.draw.rect(wall_surface, (255, 105, 180, 128), (0, self.max_y, self.game.wall_size, self.game.game_height-self.max_y))
+        screen.blit(wall_surface, (self.x, 0))
+
+class Player(object): #done
+    def __init__(self, gameClone):
+        self.game = gameClone
+        self.size = 10
+        self.x = self.size + self.game.wall_size
+        self.y = self.game.game_height * 0.5
+        self.speed = 0
+
+    def update_position(self, x, y):
+        self.x = x
+        self.y = y
+
+    def display_player(self):
+        if self.game.crash == False:
+            holder_surface = pygame.Surface((self.size*2, self.size*2), pygame.SRCALPHA).convert_alpha()
+            pygame.draw.circle(holder_surface, (255,0,0,128), pygame.Vector2(self.size, self.size), self.size)
+            screen.blit(holder_surface, (self.x-self.size, self.y-self.size))
+
+class Game:
+    def __init__(self): 
+        self.game_height = 720
+        self.game_width = 1280
+        self.crash = False
+        self.wall_size = 90
+        self.gravity = 2400
+        self.jump_velocity = 750
+        self.wall_speed = (np.power(10, 1/3)+6)*60
+        self.score = 0
+        self.player = Player(self)
+        self.walls = [Wall(self, 0), Wall(self, 1), Wall(self, 2)]
+        self.clock = pygame.time.Clock()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def update_score(self): #done
+        if(self.walls[0].x <= -self.wall_size): #if a wall reaches the left side of the screen, you cleared it
+            self.score += 1
+            self.walls[0].wall_coord()
+            holder = [self.walls[1], self.walls[2], self.walls[0]]
+            self.walls[0] = holder[0]
+            self.walls[1] = holder[1]
+            self.walls[2] = holder[2]
+            return True
+        return False
+    
+    def reset(self):
+        # pygame.quit()
+        # pygame.init()
+        pygame.event.clear()
+        self.crash = False
+        self.wall_size = 90
+        self.gravity = 2400
+        self.jump_velocity = 750
+        self.wall_speed = (np.power(10, 1/3)+6)*60
+        self.score = 0
+        self.player = Player(self)
+        self.walls = [Wall(self, 0), Wall(self, 1), Wall(self, 2)]
+        self.clock = pygame.time.Clock()
+        return self.get_state()
+    
+    def get_state(self):
+        return [self.player.speed, self.player.y, self.walls[0].x, self.walls[0].max_y, self.walls[0].min_y]
+
+    def step(self, action):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+        if(action==1):
+            self.player.speed = -self.jump_velocity
+        
+
+        self.player.y += self.player.speed/60
+        if(self.player.y <= 0 and self.player.speed<0):
+            self.player.speed = -self.player.speed
+        self.player.speed += self.gravity/60
+
+        for i in range(3):
+            self.walls[i].x-=self.wall_speed/60
+            player_pos = pygame.Vector2(self.player.x, self.player.y)
+            y_dist = min(player_pos.y - self.walls[i].min_y, self.walls[i].max_y-player_pos.y)
+            if(y_dist <= self.player.size): 
+                if(y_dist <= 0): #you're above/below the gap, check if you're within PLAYER_SIZE of the wall in the x-direction
+                    if abs(player_pos.x-(self.walls[i].x+self.wall_size/2)) <= self.wall_size/2+self.player.size:
+                        self.crash = True
+                else:
+                    if(abs(player_pos.x-(self.walls[i].x+self.wall_size/2)) <= self.wall_size/2): 
+                    #you're in between the two walls, and your y-pos collides
+                        self.crash = True
+                    else: #check the distance to the four corners
+                        topleft = player_pos.distance_to(pygame.Vector2(self.walls[i].x, self.walls[i].min_y))
+                        topright = player_pos.distance_to(pygame.Vector2(self.walls[i].x, self.walls[i].max_y))
+                        bottomleft = player_pos.distance_to(pygame.Vector2(self.walls[i].x+self.wall_size, self.walls[i].min_y))
+                        bottomright = player_pos.distance_to(pygame.Vector2(self.walls[i].x+self.wall_size, self.walls[i].max_y))
+                        if min(topleft, topright, bottomleft, bottomright) <= self.player.size:
+                            self.crash = True     
+        if self.player.y >= self.game_height+self.player.size:
+            self.crash = True
+        
+        self.update_score()
+
+        self.player.update_position(self.player.x, self.player.y)
+        self.render()
+        return self.get_state(), self.crash
+
+    def render(self): #done
+        self.player.display_player()
+        for i in range(3):
+            self.walls[i].display_wall()
 
 def create_wall() -> tuple[int, int]: #returns two integers representing the bottom and top of the gap
-    center = random.randint(screen.get_height()*1/4, screen.get_height()*3/4) #choose a random center
-    radius = random.randint(screen.get_height()/6, screen.get_height()/4) #choose a random width
+    center = random.randint((int)(screen.get_height()*1/4), (int)(screen.get_height()*3/4)) #choose a random center
+    radius = random.randint((int)(screen.get_height()/6), (int)(screen.get_height()/4)) #choose a random width
     return max(center - radius, 0), min(center + radius, screen.get_height())
 
 def menu(difficulty, highscore, highscore_replay) -> tuple[int, bool]: #returns an integer for difficulty, and a boolean for playing or not
@@ -57,13 +224,16 @@ def menu(difficulty, highscore, highscore_replay) -> tuple[int, bool]: #returns 
             highscore_position = rect
         option_rects.append((option, rect))
 
-    
-
-
-
     running = True
+    env = Game()
+    state_size = 5
+    action_size = 2
+    agent = DQNAgent(state_size, action_size)
+    agent.load("./jumpy-dqn.pth")
+    state = env.reset()
     while running:
-        screen.fill((0, 0, 0))
+        screen.fill("black")
+        done = False
         for event in pygame.event.get():
             if event.type == pygame.QUIT: #if the user closes the tab, quit
                 pygame.quit()
@@ -84,6 +254,14 @@ def menu(difficulty, highscore, highscore_replay) -> tuple[int, bool]: #returns 
                         elif(option == "Replay Highscore" and highscore > 0):
                             if(not play_recording(highscore_replay)):
                                 return False, None
+        if not done:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit
+            action = agent.act(state)
+            state, done = env.step(action)
+        if done:
+            env.reset()
 
         # draw the menu options
         option_rects[6] = (('Selected Difficulty: ' + selected_difficulty, difficulty_position))
@@ -100,12 +278,10 @@ def menu(difficulty, highscore, highscore_replay) -> tuple[int, bool]: #returns 
                 color = 'violetred1'
             elif(option == 'Play'):
                 color = (255,83,73)
-            # elif(option == 'Quit'):
-            #     color = 'red'
             text_surface = font.render(option, True, color)
             screen.blit(text_surface, rect)
 
-        pygame.display.flip()
+        update_screen()
         clock.tick(FRAMERATE)
 
 def play_recording(highscore_replay):
@@ -139,7 +315,7 @@ def play_recording(highscore_replay):
         text_surface = font.render("You are Watching a Replay", True, "white")
         rect = text_surface.get_rect(bottomright=(screen.get_width()-20, screen.get_height()-20))
         screen.blit(text_surface, rect)
-        pygame.display.flip()
+        update_screen()
         clock.tick(FRAMERATE)
 
 
@@ -182,7 +358,7 @@ def rules():
         for i, line in enumerate(instructions):
             text_surface = font.render(line, True, "white")
             screen.blit(text_surface, (20, 20 + i * 30))
-        pygame.display.flip()
+        update_screen()
         clock.tick(FRAMERATE) 
 
 def spawn_clones(clones, dt, angle_radians, replay, frame):
@@ -261,7 +437,7 @@ def run_game(gravity, jump_velocity, input_time, idle_time, speed, score, highsc
         screen.blit(text_surface, rects[i])
         replay[frame].append(['text', text[i], 'white', rects[i]])
     
-    pygame.display.flip()
+    update_screen()
 
 
     while not started:
@@ -390,7 +566,7 @@ def run_game(gravity, jump_velocity, input_time, idle_time, speed, score, highsc
         replay[frame].append(['text', 'FPS: ' + fps_val, 'white', text_position])
 
         #flip() the display to update the screen
-        pygame.display.flip()
+        update_screen()
     while(True): #check for inputs until you get one
         idle_time += 1
         for event in pygame.event.get():
@@ -425,13 +601,12 @@ def main():
         playing_game = True
         while playing_game: 
             playing_game, highscore, highscore_replay = run_game(gravity, jump_velocity, input_time, idle_time, speed, score, highscore, difficulty, highscore_replay)
-            pygame.display.flip() #update the display
+            update_screen()
             clock.tick(5) #make sure the previous space press doesn't completely start a new game
         playing, difficulty = menu(difficulty, highscore, highscore_replay) #return to menu
     pygame.quit()
     with open('replay.pkl', 'wb') as hw:
         pickle.dump(highscore_replay, hw)
-        print('overwrote')
 
 if __name__=="__main__": 
     main() 
