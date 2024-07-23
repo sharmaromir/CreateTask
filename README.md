@@ -1,4 +1,5 @@
-# CreateTask
-Dependencies: pygame, pickle
+# JumpyBall
 
-Installation: pip install pygame, pickle
+Works
+
+requirements.txt may not work, you might just have to download pygame independently
