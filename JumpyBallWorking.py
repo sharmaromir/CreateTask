@@ -63,7 +63,7 @@ class DQNAgent:
         return np.argmax(act_values.cpu().data.numpy())
 
     def load(self, name):
-        self.model.load_state_dict(torch.load(name))
+        self.model.load_state_dict(torch.load(name, map_location=torch.device("cuda")))
 
 class Wall(object): #done
     def __init__(self, gameClone, iter):
